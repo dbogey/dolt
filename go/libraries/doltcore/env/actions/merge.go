@@ -23,12 +23,6 @@ import (
 )
 
 func MergeCommits(ctx context.Context, ddb *doltdb.DoltDB, cm1, cm2 *doltdb.Commit) (*doltdb.RootValue, map[string]*merge.MergeStats, error) {
-	merger, err := merge.NewMerger(ctx, cm1, cm2, ddb.ValueReadWriter())
-
-	if err != nil {
-		return nil, nil, err
-	}
-
 	root, err := cm1.GetRootValue()
 
 	if err != nil {
@@ -41,6 +35,27 @@ func MergeCommits(ctx context.Context, ddb *doltdb.DoltDB, cm1, cm2 *doltdb.Comm
 		return nil, nil, err
 	}
 
+	ancCm, err := doltdb.GetCommitAncestor(ctx, cm1, cm2)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ancRoot, err := ancCm.GetRootValue()
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ff, err := cm1.CanFastForwardTo(ctx, cm2)
+	if err != nil {
+		return nil, nil, err
+	} else if ff {
+		return nil, nil, merge.ErrFastForward
+	}
+
+	merger := merge.NewMerger(ctx, root, mergeRoot, ancRoot, ddb.ValueReadWriter())
+
 	tblNames, err := AllTables(ctx, root, mergeRoot)
 
 	if err != nil {
@@ -52,6 +67,7 @@ func MergeCommits(ctx context.Context, ddb *doltdb.DoltDB, cm1, cm2 *doltdb.Comm
 	var unconflicted []string
 
 	// need to validate merges can be done on all tables before starting the actual merges.
+	newRoot := root
 	for _, tblName := range tblNames {
 		mergedTable, stats, err := merger.MergeTable(ctx, tblName)
 
@@ -67,7 +83,7 @@ func MergeCommits(ctx context.Context, ddb *doltdb.DoltDB, cm1, cm2 *doltdb.Comm
 			}
 
 			var err error
-			root, err = root.PutTable(ctx, tblName, mergedTable)
+			newRoot, err = newRoot.PutTable(ctx, tblName, mergedTable)
 
 			if err != nil {
 				return nil, nil, err
@@ -76,7 +92,7 @@ func MergeCommits(ctx context.Context, ddb *doltdb.DoltDB, cm1, cm2 *doltdb.Comm
 			return nil, nil, err
 		} else if has {
 			tblToStats[tblName] = &merge.MergeStats{Operation: merge.TableRemoved}
-			root, err = root.RemoveTables(ctx, tblName)
+			newRoot, err = newRoot.RemoveTables(ctx, tblName)
 
 			if err != nil {
 				return nil, nil, err
@@ -86,13 +102,13 @@ func MergeCommits(ctx context.Context, ddb *doltdb.DoltDB, cm1, cm2 *doltdb.Comm
 		}
 	}
 
-	root, err = root.UpdateSuperSchemasFromOther(ctx, unconflicted, mergeRoot)
+	newRoot, err = newRoot.UpdateSuperSchemasFromOther(ctx, unconflicted, mergeRoot)
 
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return root, tblToStats, nil
+	return newRoot, tblToStats, nil
 }
 
 func GetTablesInConflict(ctx context.Context, dEnv *env.DoltEnv) (workingInConflict, stagedInConflict, headInConflict []string, err error) {
